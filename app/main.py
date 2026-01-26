@@ -5,7 +5,8 @@ Endpoints:
 - POST /start  : receives child's profile (JSON) and replies greeting.
 - POST /chat   : receives chat message (JSON) and replies as:
     "<agent text>" (Emotion) <MotionInt>
-- POST /health : health check
+- GET/POST /health : health check
+- GET /        : simple OK (optional, avoids {"detail":"Not Found"} on base URL)
 
 Shutdown rule:
 If user sends a goodbye intent (e.g., "وداعا بيكسي", "خروج", "bye", etc.)
@@ -17,10 +18,11 @@ Environment variables required:
 - OPENAI_API_KEY_MOTION
 - OPENAI_API_KEY_PERSONA
 
-Run:
-    pip install openai fastapi uvicorn
+Run (local):
+    pip install -r requirements.txt
     uvicorn main:app --host 0.0.0.0 --port 8000
 """
+
 from __future__ import annotations
 
 import os
@@ -53,11 +55,13 @@ def _is_goodbye(text: str) -> bool:
 def _shutdown_soon() -> None:
     def _exit() -> None:
         os._exit(0)
+
     threading.Timer(0.25, _exit).start()
 
 
 app = FastAPI(title="Paixi Agent API")
 
+# Agents
 emotion_agent = EmotionAgent()
 motion_agent = MotionAgent()
 paixi = PaixiRobot(knowledge_root=".")
@@ -81,6 +85,12 @@ class ChatPayload(BaseModel):
     profile_update: Optional[Dict[str, Any]] = None
 
 
+@app.get("/")
+def root() -> Dict[str, str]:
+    return {"status": "OK"}
+
+
+@app.get("/health")
 @app.post("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -91,13 +101,19 @@ def start(payload: StartPayload) -> Dict[str, str]:
     global child_profile_text, child_profile_dict, current_motion
 
     child_profile_dict = dict(payload.profile)
-    child_profile_text = str(payload.profile)
+    child_profile_text = str(child_profile_dict)
 
-    name = payload.profile.get("name") or payload.profile.get("kidName") or payload.profile.get("fullname") or ""
+    name = (
+        payload.profile.get("name")
+        or payload.profile.get("kidName")
+        or payload.profile.get("fullname")
+        or ""
+    )
     name = str(name).strip() or "صديقي"
 
     current_motion = 0
     agent_text = f"اهلا ب @{name}"
+
     return {"reply": f"\"{_sanitize_quotes(agent_text)}\" (normal) <0>"}
 
 
@@ -107,28 +123,29 @@ def chat(payload: ChatPayload) -> Dict[str, str]:
 
     user_text = (payload.text or "").strip()
 
+    # Shutdown rule
     if _is_goodbye(user_text):
         _shutdown_soon()
         return {"reply": "Off"}
-    # If the app sends a profile/plan update, merge it into the current profile
+
+    # Merge profile update
     if payload.profile_update:
         try:
             child_profile_dict.update(dict(payload.profile_update))
-            child_profile_text = str(child_profile_dict)
         except Exception:
             pass
 
-    # If the app sends learning-plan fields directly, store them into the profile dict
+    # Store learning-plan fields (if provided)
     if payload.learning_materials is not None:
         child_profile_dict["learning_materials"] = payload.learning_materials
     if payload.learning_topics is not None:
         child_profile_dict["learning_topics"] = payload.learning_topics
     if payload.learning_hours is not None:
         child_profile_dict["learning_hours"] = payload.learning_hours
+
     child_profile_text = str(child_profile_dict)
 
-
-    # Try local/deterministic lesson handlers first (e.g., Arabic lesson)
+    # 1) Local/deterministic handlers first
     local = paixi.try_local(
         PersonaInput(
             user_text=user_text,
@@ -141,25 +158,32 @@ def chat(payload: ChatPayload) -> Dict[str, str]:
         )
     )
     if local:
-        return {"reply": local}
+        stripped_local = (local or "").strip()
+        # If already formatted, return as-is
+        if stripped_local.startswith('"') and "(" in stripped_local and "<" in stripped_local:
+            return {"reply": stripped_local}
+        # Otherwise wrap it
+        return {"reply": f"\"{_sanitize_quotes(stripped_local)}\" (normal) <{int(current_motion)}>"}
 
+    # 2) Emotion + Motion inference
     emo = emotion_agent.analyze(user_text)
 
     motion_decision = motion_agent.decide(user_text, default_state=current_motion)
-    current_motion = int(motion_decision.primary)
+    current_motion = int(getattr(motion_decision, "primary", current_motion))
 
     extra_event = ""
-    if emo.emotion == "happy":
+    if getattr(emo, "emotion", "") == "happy":
         extra_event = "very_happy"
-    elif emo.emotion == "sad":
+    elif getattr(emo, "emotion", "") == "sad":
         extra_event = "sad"
-    elif emo.emotion == "frustration":
+    elif getattr(emo, "emotion", "") == "frustration":
         extra_event = "wrong_answer"
 
+    # 3) Main reply
     reply_text = paixi.reply(
         PersonaInput(
             user_text=user_text,
-            emotion=emo.emotion,
+            emotion=getattr(emo, "emotion", "normal"),
             motion_int=current_motion,
             child_profile=child_profile_text,
             child_profile_dict=child_profile_dict,
@@ -168,9 +192,11 @@ def chat(payload: ChatPayload) -> Dict[str, str]:
         )
     )
 
-        # If reply_text is already formatted like: "..." (emotion) <...><...>
+    # If reply_text is already formatted like: "..." (emotion) <...>
     stripped = (reply_text or "").strip()
     if stripped.startswith('"') and "(" in stripped and "<" in stripped:
         return {"reply": stripped}
 
-    return {"reply": f"\"{_sanitize_quotes(reply_text)}\" ({emo.emotion}) <{current_motion}>"}
+    # Otherwise, enforce the required format
+    emotion_name = getattr(emo, "emotion", "normal") or "normal"
+    return {"reply": f"\"{_sanitize_quotes(stripped)}\" ({emotion_name}) <{int(current_motion)}>"}
