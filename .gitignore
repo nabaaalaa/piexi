@@ -2,6 +2,8 @@
 .env
 .env.*
 *.env
+env
+
 
 # python cache
 __pycache__/
