@@ -5,7 +5,29 @@ main.py (HTTP Server for Flutter/Dio)
 
 Reply format expected by Flutter:
 "نص" (emotion) <motion>
+
+Endpoints:
+- POST /start  : receives childs profile (JSON) and replies greeting.
+- POST /chat   : receives chat message (JSON) and replies as:
+    "<agent text>" (Emotion) <MotionInt>
+- GET/POST /health : health check
+- GET /        : simple OK (optional, avoids {"detail":"Not Found"} on base URL)
+
+Shutdown rule:
+If user sends a goodbye intent (e.g., "وداعا بيكسي", "خروج", "bye", etc.)
+the server replies with: Off
+then exits the process.
+
+Environment variables required:
+- OPENAI_API_KEY_EMOTION
+- OPENAI_API_KEY_MOTION
+- OPENAI_API_KEY_PERSONA
+
+Run (local):
+    pip install -r requirements.txt
+    uvicorn main:app --host 0.0.0.0 --port 8000
 """
+
 
 
 Endpoints:
