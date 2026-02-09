@@ -1,23 +1,14 @@
 """
 main.py (HTTP Server for Flutter/Dio)
-- /start: receives child profile and starts 120s free-chat window
-- /chat : handles chat + local curriculum routing + persona fallback
+
+- POST /start : receives child profile (JSON) and starts 120s free-chat window
+- POST /chat  : handles chat + local curriculum routing + persona fallback
+- GET/POST /health : health check
+- GET / : simple OK
 
 Reply format expected by Flutter:
 "نص" (emotion) <motion>
 
-Endpoints:
-- POST /start  : receives childs profile (JSON) and replies greeting.
-- POST /chat   : receives chat message (JSON) and replies as:
-    "<agent text>" (Emotion) <MotionInt>
-- GET/POST /health : health check
-- GET /        : simple OK (optional, avoids {"detail":"Not Found"} on base URL)
-
-Shutdown rule:
-If user sends a goodbye intent (e.g., "وداعا بيكسي", "خروج", "bye", etc.)
-the server replies with: Off
-then exits the process.
-
 Environment variables required:
 - OPENAI_API_KEY_EMOTION
 - OPENAI_API_KEY_MOTION
@@ -25,31 +16,7 @@ Environment variables required:
 
 Run (local):
     pip install -r requirements.txt
-    uvicorn main:app --host 0.0.0.0 --port 8000
-"""
-
-
-
-Endpoints:
-- POST /start  : receives child's profile (JSON) and replies greeting.
-- POST /chat   : receives chat message (JSON) and replies as:
-    "<agent text>" (Emotion) <MotionInt>
-- GET/POST /health : health check
-- GET /        : simple OK (optional, avoids {"detail":"Not Found"} on base URL)
-
-Shutdown rule:
-If user sends a goodbye intent (e.g., "وداعا بيكسي", "خروج", "bye", etc.)
-the server replies with: Off
-then exits the process.
-
-Environment variables required:
-- OPENAI_API_KEY_EMOTION
-- OPENAI_API_KEY_MOTION
-- OPENAI_API_KEY_PERSONA
-
-Run (local):
-    pip install -r requirements.txt
-    uvicorn main:app --host 0.0.0.0 --port 8000
+    python -m uvicorn main:app --host 0.0.0.0 --port 8000
 """
 
 from __future__ import annotations
@@ -63,7 +30,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Ensure we always import local app modules (avoid importing wrong duplicate file)
+# Ensure local imports always resolve to this folder (avoid wrong duplicate modules)
 APP_DIR = os.path.dirname(__file__)
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
@@ -74,15 +41,27 @@ from Robot_paixi import PaixiRobot, PersonaInput  # noqa: E402
 
 
 def _sanitize_quotes(s: str) -> str:
+    """Make sure we don't break the reply wrapper quotes."""
     return (s or "").replace('"', "'").strip()
 
 
 def _is_goodbye(text: str) -> bool:
     t = (text or "").strip().lower()
     goodbye_markers = [
-        "وداعا", "وداعًا", "مع السلامة", "سلام", "خروج", "اخرج", "اطلع",
-        "وداعا بيكسي", "وداعًا بيكسي", "وداعا بايكسي",
-        "bye", "goodbye", "exit", "quit",
+        "وداعا",
+        "وداعًا",
+        "مع السلامة",
+        "سلام",
+        "خروج",
+        "اخرج",
+        "اطلع",
+        "وداعا بيكسي",
+        "وداعًا بيكسي",
+        "وداعا بايكسي",
+        "bye",
+        "goodbye",
+        "exit",
+        "quit",
     ]
     return any(m in t for m in goodbye_markers)
 
@@ -91,13 +70,13 @@ def _shutdown_soon() -> None:
     def _exit() -> None:
         os._exit(0)
 
-
     threading.Timer(0.25, _exit).start()
 
 
 def _call_try_local(paixi: PaixiRobot, persona_input: PersonaInput) -> Optional[str]:
     """
-    يمنع انهيار السيرفر لو try_local غير موجودة أو توقيعها مختلف.
+    Prevent server crash if try_local doesn't exist or has a different signature
+    (supports some older versions).
     """
     fn = getattr(paixi, "try_local", None)
     if not callable(fn):
@@ -106,7 +85,7 @@ def _call_try_local(paixi: PaixiRobot, persona_input: PersonaInput) -> Optional[
     try:
         return fn(persona_input)
     except TypeError:
-        # دعم نسخة قديمة محتملة
+        # Possible old signature: try_local(text, profile_dict, ...)
         try:
             return fn(persona_input.user_text, persona_input.child_profile_dict, None)
         except Exception:
@@ -117,7 +96,7 @@ def _call_try_local(paixi: PaixiRobot, persona_input: PersonaInput) -> Optional[
 
 app = FastAPI(title="Paixi Agent API")
 
-# CORS: for LAN testing (phone -> PC)
+# CORS for LAN testing (phone -> PC / Cloud Run)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -184,12 +163,6 @@ def start(payload: StartPayload) -> Dict[str, Any]:
         or payload.profile.get("fullname")
         or ""
     )
-    name = (
-        payload.profile.get("name")
-        or payload.profile.get("kidName")
-        or payload.profile.get("fullname")
-        or ""
-    )
     name = str(name).strip() or "صديقي"
 
     current_motion = 0
@@ -198,11 +171,11 @@ def start(payload: StartPayload) -> Dict[str, Any]:
     import time as _time
 
     session_start_ts = _time.time()
-    session_id = str(child_profile_dict.get("session_id") or child_profile_dict.get("sessionId") or "") or None
+    session_id = str(
+        child_profile_dict.get("session_id") or child_profile_dict.get("sessionId") or ""
+    ).strip() or None
 
     agent_text = f"اهلا {name}"
-    agent_text = f"اهلا ب @{name}"
-
     return {"reply": f"\"{_sanitize_quotes(agent_text)}\" (normal) <0>"}
 
 
@@ -227,8 +200,6 @@ def chat(payload: ChatPayload) -> Dict[str, Any]:
         child_profile_dict["progress"] = prog
         return {"reply": "\"حسنا خلي نسولف\" (Teacher) <0>", "progress_update": prog}
 
-    # Merge profile updates
-
     # Merge profile update
     if payload.profile_update:
         try:
@@ -236,7 +207,6 @@ def chat(payload: ChatPayload) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # Learning fields (optional)
     # Store learning-plan fields (if provided)
     if payload.learning_materials is not None:
         child_profile_dict["learning_materials"] = payload.learning_materials
@@ -244,7 +214,6 @@ def chat(payload: ChatPayload) -> Dict[str, Any]:
         child_profile_dict["learning_topics"] = payload.learning_topics
     if payload.learning_hours is not None:
         child_profile_dict["learning_hours"] = payload.learning_hours
-
 
     child_profile_text = str(child_profile_dict)
 
@@ -261,11 +230,9 @@ def chat(payload: ChatPayload) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Local curriculum/router (if available)
+    # 1) Local/deterministic curriculum first (if available)
     local = _call_try_local(
         paixi,
-    # 1) Local/deterministic handlers first
-    local = paixi.try_local(
         PersonaInput(
             user_text=user_text,
             emotion="normal",
@@ -282,33 +249,25 @@ def chat(payload: ChatPayload) -> Dict[str, Any]:
             return {"reply": local, "progress_update": pu}
         return {"reply": local}
 
-    # Emotion + Motion + Persona reply
-        stripped_local = (local or "").strip()
-        # If already formatted, return as-is
-        if stripped_local.startswith('"') and "(" in stripped_local and "<" in stripped_local:
-            return {"reply": stripped_local}
-        # Otherwise wrap it
-        return {"reply": f"\"{_sanitize_quotes(stripped_local)}\" (normal) <{int(current_motion)}>"}
-
     # 2) Emotion + Motion inference
     emo = emotion_agent.analyze(user_text)
-
     motion_decision = motion_agent.decide(user_text, default_state=current_motion)
     current_motion = int(getattr(motion_decision, "primary", current_motion))
 
     extra_event = ""
-    if getattr(emo, "emotion", "") == "happy":
+    emotion_name = getattr(emo, "emotion", "normal") or "normal"
+    if emotion_name == "happy":
         extra_event = "very_happy"
-    elif getattr(emo, "emotion", "") == "sad":
+    elif emotion_name == "sad":
         extra_event = "sad"
-    elif getattr(emo, "emotion", "") == "frustration":
+    elif emotion_name == "frustration":
         extra_event = "wrong_answer"
 
-    # 3) Main reply
+    # 3) Persona reply (OpenAI)
     reply_text = paixi.reply(
         PersonaInput(
             user_text=user_text,
-            emotion=getattr(emo, "emotion", "normal"),
+            emotion=emotion_name,
             motion_int=current_motion,
             child_profile=child_profile_text,
             child_profile_dict=child_profile_dict,
@@ -317,7 +276,6 @@ def chat(payload: ChatPayload) -> Dict[str, Any]:
         )
     )
 
-    # If reply_text is already formatted like: "..." (emotion) <...>
     stripped = (reply_text or "").strip()
     pu = getattr(paixi, "_last_progress_update", None)
 
@@ -328,13 +286,7 @@ def chat(payload: ChatPayload) -> Dict[str, Any]:
         return {"reply": stripped}
 
     # Otherwise wrap it
+    wrapped = f"\"{_sanitize_quotes(reply_text)}\" ({emotion_name}) <{current_motion}>"
     if isinstance(pu, dict):
-        return {
-            "reply": f"\"{_sanitize_quotes(reply_text)}\" ({emo.emotion}) <{current_motion}>",
-            "progress_update": pu,
-        }
-
-    return {"reply": f"\"{_sanitize_quotes(reply_text)}\" ({emo.emotion}) <{current_motion}>"}
-    # Otherwise, enforce the required format
-    emotion_name = getattr(emo, "emotion", "normal") or "normal"
-    return {"reply": f"\"{_sanitize_quotes(stripped)}\" ({emotion_name}) <{int(current_motion)}>"}
+        return {"reply": wrapped, "progress_update": pu}
+    return {"reply": wrapped}
